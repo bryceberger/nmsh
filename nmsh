@@ -1,0 +1,332 @@
+#!/usr/bin/env bash
+
+VERSION=0.0.0
+
+usage() {
+    local cache
+    cache=$(cache_dir n)
+    cat <<EOF
+nmsh - [version $VERSION]
+
+Usage: $0 [OPTIONS] [COMMAND]
+
+https://app.swaggerhub.com/apis-docs/NexusMods/nexus-mods_public_api_params_in_form_data/1.0
+
+Options:
+  -h, --help       Print help
+  -b, --base       Set api base URL [default: https://api.nexusmods.com]
+  -f, --force      Force redownload of existing files in cache
+      --jq <ARG>   Apply '<ARG>' after the last jq filter, where relevant
+      --curl <ARG> Add '<ARG>' to the curl command, where relevant. 
+                   Can be repeated multiple times.
+
+Commands:
+  r, raw <PATH>    Query <PATH> directly.
+  v, validate      /v1/users/validate.json
+     mod <GAME> <MOD_ID>
+                   /v1/games/<GAME>/mods/<MOD_ID>.json
+     files <GAME> <MOD_ID>
+                   /v1/games/<GAME>/mods/<MOD_ID>/files.json
+
+Utilities:
+     fzf           Query the games.json cache by name using fzf.
+
+Cache manipulation:
+     cache-games   /v1/games.json
+                   Query the list of games, cache the result in '$cache'
+     cache-mod <GAME> <MOD_ID>
+                   Same as {mod}, but only fetches the file.
+     cache-clear   Removes the cache folder.
+EOF
+}
+
+# Params:
+#   $1: path to query
+#
+# Globals required:
+#   $NEXUSMODS_API
+#   $USER_AGENT
+#
+# Globals used:
+#   $curl_args
+make_request() {
+    local path=$1
+    require path NEXUSMODS_API NEXUSMODS_API_KEY USER_AGENT
+    need_cmd curl
+
+    info "GET: $path"
+
+    curl \
+        -H "User-Agent:$USER_AGENT" \
+        -H "apikey:$NEXUSMODS_API_KEY" \
+        "${curl_args[@]}" \
+        "$NEXUSMODS_API$path"
+}
+
+main() {
+    NEXUSMODS_API="${NEXUSMODS_API:-https://api.nexusmods.com}"
+    USER_AGENT="${USER_AGENT:-nmsh/$VERSION bash/$BASH_VERSION}"
+
+    jq_cmd=.
+    curl_args=()
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+        -h | --help)
+            show_help=1
+            shift
+            ;;
+        -b | --base)
+            require_arg 1 "$@"
+            NEXUSMODS_API=$2
+            shift
+            shift
+            ;;
+        -f | --force)
+            force_update=1
+            shift
+            ;;
+        --jq)
+            require_arg 1 "$@"
+            jq_cmd=$2
+            shift
+            shift
+            ;;
+        --curl)
+            require_arg 1 "$@"
+            curl_args+=("$2")
+            shift
+            shift
+            ;;
+
+        # cache manip
+        cache-clear)
+            cache_clear=1
+            shift
+            ;;
+        cache-games)
+            cache_games=1
+            shift
+            ;;
+        cache-mod)
+            require_arg 2 "$@"
+            cache_mod_info=1
+            game=$2
+            mod=$3
+            shift
+            shift
+            shift
+            ;;
+
+        mod | files)
+            require_arg 2 "$@"
+            case $1 in
+            mod) mod_info=1 ;;
+            files) files=1 ;;
+            esac
+            game=$2
+            mod=$3
+            shift
+            shift
+            shift
+            ;;
+
+        # utils
+        fzf)
+            fzf=1
+            shift
+            ;;
+
+        # api
+        r | raw)
+            require_arg 1 "$@"
+            raw_path=$2
+            shift
+            shift
+            ;;
+        v | validate)
+            validate=1
+            shift
+            ;;
+
+        *)
+            err "unknown argument: $1"
+            shift
+            ;;
+        esac
+    done
+
+    if [[ -n ${show_help+x} ]]; then
+        usage
+        exit 0
+    fi
+
+    if [[ -n ${raw_path} ]]; then
+        make_request "$raw_path"
+        exit
+    fi
+
+    if [[ -n ${validate+x} ]]; then
+        make_request "/v1/users/validate.json"
+        exit
+    fi
+
+    if [[ -n ${cache_clear+x} ]]; then
+        cache=$(cache_dir n)
+        echo "removing '$cache'..."
+        rm -r "$cache"
+        exit
+    fi
+
+    if [[ -n ${cache_games+x} ]]; then
+        cache_games
+        exit
+    fi
+
+    if [[ -n ${cache_mod_info+x} ]]; then
+        cache_mod_info "$game" "$mod"
+        exit
+    fi
+
+    if [[ -n ${mod_info+x} ]]; then
+        show_mod "$game" "$mod"
+        exit
+    fi
+
+    if [[ -n ${files+x} ]]; then
+        show_files "$game" "$mod"
+        exit
+    fi
+
+    if [[ -n ${fzf+x} ]]; then
+        game_info_fzf
+        exit
+    fi
+
+    # default fallthrough
+    usage
+    exit 1
+}
+
+# Params:
+#   $any: If set, *will not* create the directory.
+#         If no parameters passed, *will* create the directory.
+#
+# Output: the cache directory, as an absolute path
+cache_dir() {
+    local cache=${XDG_CACHE_DIR:-$HOME/.cache}/nmsh
+    if [[ $# -eq 0 ]]; then mkdir -p "$cache"; fi
+    echo "$cache"
+}
+
+cache_subdir() {
+    local cache
+    cache=$(cache_dir n)/$1
+    mkdir -p "$cache"
+    echo "$cache"
+}
+
+err() {
+    printf "%serror:%s %s\n" "$(tput setaf 1)" "$(tput sgr0)" "$1" 1>&2
+}
+
+info() {
+    printf "%sinfo:%s %s\n" "$(tput setaf 4)" "$(tput sgr0)" "$1" 1>&2
+}
+
+require() {
+    while [[ $# -ne 0 ]]; do
+        if [[ -z ${!1} ]]; then
+            err "'$1' must be set and non-empty"
+            exit 1
+        fi
+        shift
+    done
+}
+
+need_cmd() {
+    while [[ $# -ne 0 ]]; do
+        if ! check_cmd "$1"; then
+            err "need '$1' (command not found)"
+            exit 1
+        fi
+        shift
+    done
+}
+
+check_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Params:
+#   $1: number of args required
+#   $2..: "$@"
+require_arg() {
+    local n=$(($# - 2))
+    if [[ $n -lt $1 ]]; then
+        local s
+        s=$(if [[ $1 -eq 1 ]]; then printf ""; else printf "s"; fi)
+        err "'$2' requires $1 parameter$s ($n given)"
+        exit 1
+    fi
+}
+
+need_file() {
+    while [[ $# -ne 0 ]]; do
+        if ! [[ -f $1 ]]; then
+            err "'$1' not found"
+            exit 1
+        fi
+        shift
+    done
+}
+
+get_file() {
+    local api_path=$1
+    local file=$2
+    require api_path file
+
+    if [[ -n ${force_update+x} ]] || ! [[ -f $file ]]; then
+        make_request "$api_path" >"$file"
+    fi
+    need_file "$file"
+}
+
+cache_games() {
+    get_file "/v1/games.json" "$(cache_dir)/games.json"
+}
+
+cache_mod() {
+    get_file "/v1/games/$1/mods/$2.json" "$(cache_subdir "$1")/$2.json"
+}
+
+cache_files() {
+    get_file "/v1/games/$1/mods/$2/files.json" "$(cache_subdir "$1/$2")/files.json"
+}
+
+show_mod() {
+    need_cmd jq
+    cache_mod "$@"
+    jq <"$(cache_subdir "$1")/$2.json" "$jq_cmd"
+}
+
+show_files() {
+    need_cmd jq
+    cache_files "$@"
+    jq <"$(cache_subdir "$1/$2")/files.json" "$jq_cmd"
+}
+
+game_info_fzf() {
+    need_cmd jq fzf
+
+    cache_games
+    games=$(cache_dir)/games.json
+
+    if ! name=$(jq -r '.[] | .name' <"$games" | fzf); then
+        return
+    fi
+
+    jq <"$games" ".[] | select(.name == \"$name\") | $jq_cmd"
+}
+
+main "$@"
