@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 
 VERSION=0.0.0
+NEXUSMODS_API="${NEXUSMODS_API:-https://api.nexusmods.com}"
+NEXUSMODS="${NEXUSMODS:-https://www.nexusmods.com}"
+USER_AGENT="${USER_AGENT:-nmsh/$VERSION bash/$BASH_VERSION}"
 
 usage() {
     local cache
@@ -16,17 +19,18 @@ Options:
   -h, --help       Print help
   -b, --base       Set api base URL [default: https://api.nexusmods.com]
   -f, --force      Force redownload of existing files in cache
+      --manager    Use mod manager links for \`download\`
       --jq <ARG>   Apply '<ARG>' after the last jq filter, where relevant
-      --curl <ARG> Add '<ARG>' to the curl command, where relevant. 
-                   Can be repeated multiple times.
 
 Commands:
   r, raw <PATH>    Query <PATH> directly.
   v, validate      /v1/users/validate.json
-     mod <GAME> <MOD_ID>
+  m, mod <GAME> <MOD_ID>
                    /v1/games/<GAME>/mods/<MOD_ID>.json
-     files <GAME> <MOD_ID>
+  f, files <GAME> <MOD_ID>
                    /v1/games/<GAME>/mods/<MOD_ID>/files.json
+  d, download <GAME> <MOD_ID> <FILE_ID>
+                   $ xdg-open $NEXUSMODS/\$GAME/mods/\$MOD_ID?tab=files&file_id=\$FILE_ID
 
 Utilities:
      fzf           Query the games.json cache by name using fzf.
@@ -37,6 +41,11 @@ Cache manipulation:
      cache-mod <GAME> <MOD_ID>
                    Same as {mod}, but only fetches the file.
      cache-clear   Removes the cache folder.
+
+Useful jq scripts:
+
+Get all versions and file_ids of a mod in a more compact list:
+    \`reduce .files.[] as { \$name, \$version, \$file_id } ({}; . * {\$name: {\$version: \$file_id}})\`
 EOF
 }
 
@@ -46,29 +55,20 @@ EOF
 # Globals required:
 #   $NEXUSMODS_API
 #   $USER_AGENT
-#
-# Globals used:
-#   $curl_args
 make_request() {
     local path=$1
     require path NEXUSMODS_API NEXUSMODS_API_KEY USER_AGENT
-    need_cmd curl
+    need_cmd xh
 
     info "GET: $path"
 
-    curl \
-        -H "User-Agent:$USER_AGENT" \
-        -H "apikey:$NEXUSMODS_API_KEY" \
-        "${curl_args[@]}" \
-        "$NEXUSMODS_API$path"
+    xh "$NEXUSMODS_API$path" \
+        "User-Agent:$USER_AGENT" \
+        "apikey:$NEXUSMODS_API_KEY"
 }
 
 main() {
-    NEXUSMODS_API="${NEXUSMODS_API:-https://api.nexusmods.com}"
-    USER_AGENT="${USER_AGENT:-nmsh/$VERSION bash/$BASH_VERSION}"
-
     jq_cmd=.
-    curl_args=()
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -86,15 +86,13 @@ main() {
             force_update=1
             shift
             ;;
+        --manager)
+            use_manager=1
+            shift
+            ;;
         --jq)
             require_arg 1 "$@"
             jq_cmd=$2
-            shift
-            shift
-            ;;
-        --curl)
-            require_arg 1 "$@"
-            curl_args+=("$2")
             shift
             shift
             ;;
@@ -118,14 +116,33 @@ main() {
             shift
             ;;
 
-        mod | files)
+        m | mod)
             require_arg 2 "$@"
-            case $1 in
-            mod) mod_info=1 ;;
-            files) files=1 ;;
-            esac
+            mod_info=1
             game=$2
             mod=$3
+            shift
+            shift
+            shift
+            ;;
+
+        f | files)
+            require_arg 2 "$@"
+            files=1
+            game=$2
+            mod=$3
+            shift
+            shift
+            shift
+            ;;
+
+        d | download)
+            require_arg 3 "$@"
+            download=1
+            game=$2
+            mod=$3
+            file_id=$4
+            shift
             shift
             shift
             shift
@@ -195,6 +212,11 @@ main() {
 
     if [[ -n ${files+x} ]]; then
         show_files "$game" "$mod"
+        exit
+    fi
+
+    if [[ -n ${download+x} ]]; then
+        open_download "$game" "$mod" "$file_id"
         exit
     fi
 
@@ -314,6 +336,16 @@ show_files() {
     need_cmd jq
     cache_files "$@"
     jq <"$(cache_subdir "$1/$2")/files.json" "$jq_cmd"
+}
+
+open_download() {
+    need_cmd xdg-open
+    if [[ -n ${use_manager+x} ]]; then
+        trailing="&nmm=1"
+    fi
+    url="$NEXUSMODS/$1/mods/$2?tab=files&file_id=$3$trailing"
+    info "opening $url"
+    xdg-open "$url"
 }
 
 game_info_fzf() {

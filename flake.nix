@@ -6,8 +6,9 @@
     devShells.${system}.default = pkgs.mkShellNoCC {
       packages = with pkgs; [
         curl
-        jq
         fzf
+        jq
+        xh
 
         bash-language-server
         shfmt
